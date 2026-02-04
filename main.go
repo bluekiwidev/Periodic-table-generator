@@ -13,9 +13,9 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
-	"log"
 
 	"golang.org/x/image/font"
 	"golang.org/x/image/font/opentype"
@@ -28,16 +28,12 @@ const symSize = 2.5
 const nameSize = 6.5
 const massSize = 8.8
 
-type SourceRoot struct {
-	Elements []struct {
-		Number     int     `json:"number"`
-		Symbol     string  `json:"symbol"`
-		Name       string  `json:"name"`
-		AtomicMass float64 `json:"atomic_mass"`
-		Category   string  `json:"category"`
-		Xpos       int     `json:"xpos"`
-		Ypos       int     `json:"ypos"`
-	} `json:"elements"`
+type PubChemResponse struct {
+	Table struct {
+		Row []struct {
+			Cell []interface{} `json:"Cell"`
+		} `json:"Row"`
+	} `json:"Table"`
 }
 
 type Element struct {
@@ -80,7 +76,7 @@ func normaliseCategory(c string) string {
 		return "alkaline earth metal"
 	case "transition metal", "transition metals":
 		return "transition metal"
-	case "post transition metal", "post transition metals":
+	case "post transition metal", "post transition metals", "post-transition metal":
 		return "post-transition metal"
 	case "lanthanide", "lanthanoid", "lanthanoids", "lanthanides":
 		return "lanthanide"
@@ -91,9 +87,24 @@ func normaliseCategory(c string) string {
 	}
 }
 
+func toFloat(v interface{}) float64 {
+	switch val := v.(type) {
+	case float64:
+		return val
+	case string:
+		f, err := strconv.ParseFloat(val, 64)
+		if err != nil {
+			return 0
+		}
+		return f
+	default:
+		return 0
+	}
+}
+
 func fetchElements() ([]Element, error) {
 	client := http.Client{Timeout: 20 * time.Second}
-	const url = "https://raw.githubusercontent.com/Bowserinator/Periodic-Table-JSON/master/PeriodicTableJSON.json"
+	const url = "https://pubchem.ncbi.nlm.nih.gov/rest/pug/periodictable/JSON"
 	resp, err := client.Get(url)
 	if err != nil {
 		return nil, err
@@ -103,18 +114,34 @@ func fetchElements() ([]Element, error) {
 	if err != nil {
 		return nil, err
 	}
-	var root SourceRoot
+	var root PubChemResponse
 	if err := json.Unmarshal(body, &root); err != nil {
 		return nil, err
 	}
 	var es []Element
-	for _, e := range root.Elements {
+	for _, row := range root.Table.Row {
+		if len(row.Cell) < 4 {
+			continue
+		}
+		// Extract values from Cell array
+		// Column order: AtomicNumber, Symbol, Name, AtomicMass, CPKHexColor, ..., GroupBlock (index 15)
+		num := int(toFloat(row.Cell[0]))
+		symbol := fmt.Sprint(row.Cell[1])
+		name := fmt.Sprint(row.Cell[2])
+		mass := toFloat(row.Cell[3])
+
+		// GroupBlock is at index 15
+		category := "unknown"
+		if len(row.Cell) > 15 {
+			category = fmt.Sprint(row.Cell[15])
+		}
+
 		es = append(es, Element{
-			Number: e.Number,
-			Symbol: e.Symbol,
-			Name:   e.Name,
-			Mass:   e.AtomicMass,
-			Type:   normaliseCategory(e.Category),
+			Number: num,
+			Symbol: symbol,
+			Name:   name,
+			Mass:   mass,
+			Type:   normaliseCategory(category),
 		})
 	}
 	sort.Slice(es, func(i, j int) bool { return es[i].Number < es[j].Number })
@@ -158,13 +185,6 @@ func main() {
 	height := flag.Int("height", 600, "tile image height in px (width scales to aspect ratio)")
 	flag.Parse()
 
-	// Load sample image to know aspect ratio
-	file, err := os.Open("Untitled.png")
-	if err != nil {
-    	log.Fatal(err)
-	}
-	defer file.Close()
-
 	ratio := float64(2456) / float64(1882)
 	tileH := *height
 	tileW := int(ratio * float64(tileH))
@@ -183,9 +203,9 @@ func main() {
 
 	// Load font faces of different sizes
 	numFont, _ := loadFont(*fontPath, float64(tileH)/numSize)   // ~large enough
-	symFont, _ := loadFont(*fontPath, float64(tileH)/symSize)    // biggest
-	nameFont, _ := loadFont(*fontPath, float64(tileH)/nameSize)  // medium
-	massFont, _ := loadFont(*fontPath, float64(tileH)/massSize)  // smallest
+	symFont, _ := loadFont(*fontPath, float64(tileH)/symSize)   // biggest
+	nameFont, _ := loadFont(*fontPath, float64(tileH)/nameSize) // medium
+	massFont, _ := loadFont(*fontPath, float64(tileH)/massSize) // smallest
 
 	// Fetch element data
 	elements, err := fetchElements()
